@@ -16,9 +16,9 @@ This module contains two groups of functions:
   years and assembles the ``inputs_dict`` consumed by
   :func:`scripts.prepare_network.build_network`.
 
-All CSV outputs are written to ``data/Inputs_{year}/`` (EU locations) or
-``data/California/Inputs_{year}/`` (US locations), as determined by the
-project coordinates in ``config.yaml``.
+Non-reserve CSVs are written to ``data/Inputs_{year}/`` (EU locations) or
+``data/California/Inputs_{year}/`` (US locations). Reserve-market files are
+stored in the corresponding ``reserve_markets/`` subfolder.
 
 .. note::
    Leap-year days (Feb 29) are dropped to keep all years on the same
@@ -30,6 +30,7 @@ import numpy as np
 import requests
 from pathlib import Path
 from scripts import parameters as p
+from scripts.reserve_markets import preprocess_reserves, load_reserve_inputs
 import os
 from io import StringIO
 import json
@@ -367,8 +368,12 @@ def load_input_data():
     NG_price_year = NG_price_year.set_axis(p.hours_in_period)
     DH_external_demand = pd.read_csv(p.DH_external_demand_input_file, sep=';', index_col=0)  # currency/MWh
     DH_external_demand = DH_external_demand.set_axis(p.hours_in_period)
+    reserves = load_reserve_inputs(p.folder_data, p.hours_in_period)
 
-    return GL_inputs, GL_eff, Elspotprices, CO2_emiss_El, CF_wind, CF_solar, NG_price_year, DH_external_demand
+    return (
+        GL_inputs, GL_eff, Elspotprices, CO2_emiss_El, CF_wind, CF_solar,
+        NG_price_year, DH_external_demand, reserves,
+    )
 
 
 # ---- DEMANDS for H2, MeOH and El_DK1_GLS
@@ -796,8 +801,9 @@ def pre_processing_energy_data(year: int = None, dh_peak_capacity: float = None)
     Fetches data from the Energi Data Service API (electricity spot prices,
     CO₂ emission intensities, natural gas prices, district-heating demand)
     and from the Renewables.ninja API (wind and solar capacity factors), then
-    writes all results as semicolon-delimited CSV files to
-    ``data/Inputs_{year}/`` (EU) or ``data/California/Inputs_{year}/`` (US).
+    writes semicolon-delimited CSV files to ``data/Inputs_{year}/`` (EU) or
+    ``data/California/Inputs_{year}/`` (US). Reserve-market files are stored
+    under the year's ``reserve_markets/`` subfolder.
 
     A ``"HourDK"`` sorted, leap-year-stripped hourly index is enforced on all
     outputs so they align with the model snapshot index from
@@ -912,6 +918,10 @@ def pre_processing_energy_data(year: int = None, dh_peak_capacity: float = None)
         CO2_emiss_El.to_csv(CO2emis_input_file, sep=';')
     else:
         print(f"[preprocess] Skipping CO2 emissions download — {CO2emis_input_file} already exists.")
+
+    preprocess_reserves(
+        _year, _folder, hours_in_period, start_date, end_date, download_energidata
+    )
 
     # NG prices depending on the year
     ''' NG prices prices in DKK/kWh or EUR/kWH'''
@@ -1126,13 +1136,22 @@ def prepare_all_inputs(targets_dict: dict, CO2_cost: float,
         * ``"CF_solar"`` — hourly solar capacity factors
         * ``"NG_price_year"`` — hourly natural gas price (EUR/MWh)
         * ``"DH_external_demand"`` — hourly district-heating demand (MWh)
+        * ``"aFRR_capacity_reserves"`` — aFRR capacity-market data for DK1
+        * ``"aFRR_energy_activation"`` — aFRR energy-activation data for DK1
+        * ``"mFRR_capacity_reserves"`` — mFRR capacity-market data for DK1
+        * ``"mFRR_energy_activation"`` — mFRR energy-activation data for DK1
+        * ``"FCR_capacity_reserves"`` — FCR capacity and price data for DK1
+        * ``"FCR_activation_15min"`` — frequency-based FCR activation for DK1 at 15-minute resolution
         * ``"demands"`` — sub-dict with H₂, bioCH₄ and MeOH demand series
         * ``"CO2_cost"`` — CO₂ price scalar (EUR/t)
         * ``"max_RE_to_grid"`` — grid export fraction scalar
     """
 
     # load the inputs from CSV files
-    GL_inputs, GL_eff, Elspotprices, CO2_emiss_El, CF_wind, CF_solar, NG_price_year, DH_external_demand = load_input_data()
+    (
+        GL_inputs, GL_eff, Elspotprices, CO2_emiss_El, CF_wind, CF_solar,
+        NG_price_year, DH_external_demand, reserves,
+    ) = load_input_data()
 
     '''Build all demands'''
     # build demands TS (considers targets_dict['driver'])
@@ -1163,6 +1182,7 @@ def prepare_all_inputs(targets_dict: dict, CO2_cost: float,
         'CO2 cost ref year':       CO2_cost_ref_year,
         'max_RE_to_grid':          max_RE_to_grid,
     }
+    inputs_dict.update(reserves)
 
     if targets_dict["driver"] == "price":
         idx = Elspotprices.index  # <- align with scenario/year data
@@ -1185,4 +1205,3 @@ def prepare_all_inputs(targets_dict: dict, CO2_cost: float,
     inputs_dict['premium_eCH4']   = float(targets_dict.get('premium_eCH4', 0.0))
 
     return inputs_dict
-
